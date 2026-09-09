@@ -5,34 +5,89 @@ Script Bash para automatizar a instalação do [GLPI](https://glpi-project.org/)
 ## O que o script faz
 
 1. **Detecta o sistema operacional** a partir de `/etc/os-release`, valida que é uma distro baseada em APT e identifica a família (Debian ou Ubuntu, incluindo derivados via `ID_LIKE`) para escolher o repositório de PHP adequado.
-2. **Coleta as configurações da instalação** interativamente, com valores padrão sugeridos:
+2. **Faz uma verificação inicial do ambiente** e mostra o que já existe no servidor: PHP (presença e versão), versões configuradas em `/etc/php`, Apache (presença, versão e se o serviço está ativo), servidor de banco (MariaDB ou MySQL, versão, serviço e se o root consegue conectar) e se o repositório de PHP já está configurado.
+3. **Coleta as configurações da instalação** interativamente, com valores padrão sugeridos:
    - Versão do GLPI (padrão: `11.0.8`)
-   - Versão do PHP (padrão: `8.2`)
+   - Versão do PHP (padrão: `8.2`, ou a versão já instalada quando existir uma)
    - Nome do banco de dados e usuário do GLPI
    - Senha do banco (gera uma senha aleatória com `openssl rand -hex 18`, ou permite informar uma)
    - Caminho de instalação (padrão: `/var/www/glpi`)
    - `ServerName` do Apache (opcional)
-   - Aplicação de hardening básico no MariaDB (equivalente ao `mysql_secure_installation`)
-   - Uso do repositório de PHP detectado automaticamente para a distro (ver seção abaixo)
-3. **Exibe um resumo** e pede confirmação antes de prosseguir.
-4. **Atualiza o sistema** e instala pacotes base (`ca-certificates`, `curl`, `wget`, `unzip`, `gnupg`, etc.).
-5. **Configura o repositório de PHP** conforme a distro detectada (PPA `ondrej/php` no Ubuntu, Sury no Debian), reutilizando o repositório caso ele já esteja presente no sistema.
-6. **Verifica se a versão de PHP escolhida está disponível** nos repositórios configurados e aborta com uma mensagem clara antes de instalar qualquer coisa, caso não esteja.
-7. **Instala a stack web**: Apache, MariaDB e PHP com todas as extensões exigidas pelo GLPI (`curl`, `gd`, `mbstring`, `mysql`, `xml`, `imap`, `ldap`, `soap`, `snmp`, `apcu`, `intl`, `bz2`, `zip`, `bcmath`).
-8. **Aplica hardening básico no MariaDB** (remove usuários anônimos e o banco `test`), se confirmado.
-9. **Cria o banco de dados e o usuário do GLPI**, com as credenciais informadas, e testa a autenticação.
-10. **Baixa e extrai o GLPI** da versão especificada diretamente do GitHub Releases, fazendo backup automático de uma instalação existente no mesmo caminho.
-11. **Configura o VirtualHost do Apache**, com `mod_rewrite` habilitado e regras para repassar o cabeçalho `Authorization` e redirecionar requisições para `index.php`.
-12. **Ajusta o `php.ini`** (`memory_limit`, `upload_max_filesize`, `post_max_size`, `max_execution_time`, `session.cookie_httponly`, `expose_php`).
-13. **Configura as permissões** do diretório de instalação (`www-data`, com `775` em `files`, `config`, `plugins` e `marketplace`).
-14. **Salva as credenciais** geradas em `/root/glpi-install-credentials.txt` (permissão `600`).
-15. **Exibe um passo a passo final**, explicando que o GLPI ainda não está instalado (isso só acontece pelo assistente web) e o que fazer em seguida.
+4. **Monta um plano de instalação** com 14 etapas, marcando cada uma como `install` ou `skip` conforme o que já está pronto no servidor (ver seção abaixo). O plano pode ser aceito como está ou ajustado etapa por etapa.
+5. **Executa as etapas selecionadas**, cada uma isolada: se uma falha, as demais continuam. As etapas que dependem de uma etapa que falhou são marcadas como puladas em vez de tentadas.
+6. **Salva as credenciais** em `/root/glpi-install-credentials.txt` (permissão `600`), registrando também o resultado da etapa de banco de dados.
+7. **Mostra o ambiente final** (PHP, pacotes ainda faltando, Apache, banco e arquivos do GLPI) depois da execução.
+8. **Exibe um relatório** com o resultado de cada etapa (`OK`, `FAIL` ou `SKIP`, com o motivo) e o total de sucessos, falhas e etapas puladas. O script sai com código `1` se alguma etapa falhou.
+9. **Exibe o passo a passo final** apenas quando tudo o que é necessário ficou pronto, explicando que o GLPI ainda não está instalado (isso só acontece pelo assistente web) e o que fazer em seguida. Se algo essencial falhou, o script mostra quais etapas impedem o acesso pelo navegador.
 
 Todo o processo é registrado em `/var/log/glpi-install.log`.
 
 > **Importante:** o script **não** remove o diretório `install/` do GLPI. Essa remoção só pode
 > acontecer depois de concluir o assistente de instalação pelo navegador. Removê-lo antes
 > impede o GLPI de configurar idioma, licença e conexão com o banco pela interface web.
+
+## Etapas e escolha do que instalar
+
+O plano tem estas etapas, na ordem de execução:
+
+| # | Etapa | Pulada por padrão quando |
+|---|---|---|
+| 1 | Atualizar as listas de pacotes do APT | nunca |
+| 2 | Atualizar os pacotes do sistema (`apt-get upgrade`) | nunca |
+| 3 | Instalar pacotes base (`curl`, `wget`, `unzip`, `gnupg`, etc.) | nunca |
+| 4 | Configurar o repositório de PHP da distro | o PHP escolhido já está completo, ou não há repositório conhecido |
+| 5 | Instalar PHP e as extensões do GLPI | todos os pacotes da versão escolhida já estão instalados |
+| 6 | Instalar o Apache | o Apache já está instalado |
+| 7 | Instalar o servidor MariaDB | já existe MariaDB ou MySQL instalado |
+| 8 | Habilitar e iniciar Apache e banco de dados | nunca |
+| 9 | Hardening básico do banco (equivalente ao `mysql_secure_installation`) | o servidor de banco já existia antes desta execução |
+| 10 | Criar o banco e o usuário do GLPI | já existe `config/config_db.php` no caminho de instalação |
+| 11 | Baixar e extrair o GLPI | a mesma versão do GLPI já está no caminho de instalação |
+| 12 | Configurar o VirtualHost do Apache | nunca |
+| 13 | Ajustar o `php.ini` para o GLPI | nunca |
+| 14 | Aplicar as permissões dos arquivos do GLPI | nunca |
+
+Depois de exibir o plano, o script pergunta se ele deve ser executado como está. Respondendo
+`n`, é possível marcar `y` ou `n` para cada etapa individualmente e revisar o plano de novo
+antes de confirmar.
+
+Detalhes úteis:
+
+- A etapa de PHP instala **apenas os pacotes que faltam** para a versão escolhida, incluindo
+  `libapache2-mod-php`. O plano lista quais pacotes serão instalados.
+- Os pacotes são divididos em obrigatórios e opcionais:
+  - obrigatórios: `php`, `php-cli`, `php-common`, `curl`, `gd`, `mbstring`, `mysql`, `xml`,
+    `intl`, `zip`, `bcmath` e `libapache2-mod-php`;
+  - opcionais: `imap`, `ldap`, `soap`, `snmp`, `apcu` e `bz2`.
+
+  Os opcionais são instalados um a um. Se a distro não fornecer algum deles (o caso mais
+  comum é o `php-imap`, removido de versões recentes), ele é apenas reportado como aviso no
+  relatório final, sem derrubar a etapa de PHP nem o resto da instalação.
+- Se a versão de PHP escolhida não existir nos repositórios configurados, apenas a etapa de
+  PHP falha (com a mensagem explicando o que fazer); o restante do plano continua.
+- Se já existir um banco instalado e o root não conseguir conectar pelo socket local, o
+  script pede a senha de root (até três tentativas) para poder criar o banco do GLPI.
+- Uma instalação existente em `/var/www/glpi` nunca é apagada: se a etapa de download for
+  executada, o diretório atual é movido para `<caminho>.backup.AAAAMMDDHHMMSS`.
+- O plano avisa quando o usuário do banco já existe, porque nesse caso a etapa de banco
+  redefine a senha dele para a informada nesta execução.
+
+## Relatório e reexecução
+
+No final, o script imprime uma linha por etapa:
+
+```
+[  OK  ] Update APT package lists
+[ FAIL ] Install PHP 8.2 and extensions                 exit code 1
+[ SKIP ] Install Apache                                 Apache is already installed (Apache/2.4.58 (Ubuntu))
+[ SKIP ] Tune PHP settings for GLPI                     dependency failed: Install PHP 8.2 and extensions
+
+Succeeded: 8  Failed: 1  Skipped: 4
+```
+
+Como a verificação inicial detecta o que já está pronto, o script pode ser executado quantas
+vezes for necessário: corrija o motivo da falha, rode de novo e as etapas já concluídas
+aparecem no plano como `skip`.
 
 ## Repositório de PHP por distribuição
 
@@ -54,7 +109,8 @@ Observações:
   `/usr/share/keyrings/sury-php.gpg` e `signed-by` no arquivo
   `/etc/apt/sources.list.d/sury-php.list`, usando o codename detectado do sistema.
 - Se você recusar a adição do repositório e a versão de PHP não existir nos repositórios da
-  distro, o script aborta na etapa de verificação, antes de instalar Apache, MariaDB ou PHP.
+  distro, apenas a etapa de PHP falha e é reportada no relatório final; as outras etapas do
+  plano continuam sendo executadas.
 
 ## Requisitos
 
@@ -77,7 +133,9 @@ curl -fsSLO https://raw.githubusercontent.com/Peterfilho/glpi-installer/refs/hea
 sudo bash glpi-installer.sh
 ```
 
-O script é interativo: pressione Enter para aceitar cada valor padrão sugerido ou informe um valor customizado.
+O script é interativo: pressione Enter para aceitar cada valor padrão sugerido ou informe um
+valor customizado. Antes de qualquer alteração no sistema, ele mostra o que já está instalado
+e o plano de etapas, que pode ser aceito por inteiro ou ajustado etapa por etapa.
 
 > **Atenção:** não use `curl ... | sudo bash`. Nesse formato o `stdin` fica ocupado pelo
 > download e os prompts do script não conseguem ler as suas respostas.
