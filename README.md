@@ -4,7 +4,7 @@ Script Bash para automatizar a instalação do [GLPI](https://glpi-project.org/)
 
 ## O que o script faz
 
-1. **Detecta o sistema operacional** a partir de `/etc/os-release` e valida que é uma distro baseada em APT.
+1. **Detecta o sistema operacional** a partir de `/etc/os-release`, valida que é uma distro baseada em APT e identifica a família (Debian ou Ubuntu, incluindo derivados via `ID_LIKE`) para escolher o repositório de PHP adequado.
 2. **Coleta as configurações da instalação** interativamente, com valores padrão sugeridos:
    - Versão do GLPI (padrão: `11.0.8`)
    - Versão do PHP (padrão: `8.2`)
@@ -13,25 +13,48 @@ Script Bash para automatizar a instalação do [GLPI](https://glpi-project.org/)
    - Caminho de instalação (padrão: `/var/www/glpi`)
    - `ServerName` do Apache (opcional)
    - Aplicação de hardening básico no MariaDB (equivalente ao `mysql_secure_installation`)
-   - Uso do PPA `ondrej/php` no Ubuntu, para instalar a versão de PHP desejada
+   - Uso do repositório de PHP detectado automaticamente para a distro (ver seção abaixo)
 3. **Exibe um resumo** e pede confirmação antes de prosseguir.
-4. **Atualiza o sistema** e instala pacotes base (`curl`, `wget`, `unzip`, `gnupg`, etc.).
-5. **Configura o repositório de PHP** (PPA `ondrej/php`, se selecionado).
-6. **Instala a stack web**: Apache, MariaDB e PHP com todas as extensões exigidas pelo GLPI (`curl`, `gd`, `mbstring`, `mysql`, `xml`, `imap`, `ldap`, `soap`, `snmp`, `apcu`, `intl`, `bz2`, `zip`, `bcmath`).
-7. **Aplica hardening básico no MariaDB** (remove usuários anônimos e o banco `test`), se confirmado.
-8. **Cria o banco de dados e o usuário do GLPI**, com as credenciais informadas, e testa a autenticação.
-9. **Baixa e extrai o GLPI** da versão especificada diretamente do GitHub Releases, fazendo backup automático de uma instalação existente no mesmo caminho.
-10. **Configura o VirtualHost do Apache**, com `mod_rewrite` habilitado e regras para repassar o cabeçalho `Authorization` e redirecionar requisições para `index.php`.
-11. **Ajusta o `php.ini`** (`memory_limit`, `upload_max_filesize`, `post_max_size`, `max_execution_time`, `session.cookie_httponly`, `expose_php`).
-12. **Configura as permissões** do diretório de instalação (`www-data`, com `775` em `files`, `config`, `plugins` e `marketplace`).
-13. **Salva as credenciais** geradas em `/root/glpi-install-credentials.txt` (permissão `600`).
-14. **Exibe um passo a passo final**, explicando que o GLPI ainda não está instalado (isso só acontece pelo assistente web) e o que fazer em seguida.
+4. **Atualiza o sistema** e instala pacotes base (`ca-certificates`, `curl`, `wget`, `unzip`, `gnupg`, etc.).
+5. **Configura o repositório de PHP** conforme a distro detectada (PPA `ondrej/php` no Ubuntu, Sury no Debian), reutilizando o repositório caso ele já esteja presente no sistema.
+6. **Verifica se a versão de PHP escolhida está disponível** nos repositórios configurados e aborta com uma mensagem clara antes de instalar qualquer coisa, caso não esteja.
+7. **Instala a stack web**: Apache, MariaDB e PHP com todas as extensões exigidas pelo GLPI (`curl`, `gd`, `mbstring`, `mysql`, `xml`, `imap`, `ldap`, `soap`, `snmp`, `apcu`, `intl`, `bz2`, `zip`, `bcmath`).
+8. **Aplica hardening básico no MariaDB** (remove usuários anônimos e o banco `test`), se confirmado.
+9. **Cria o banco de dados e o usuário do GLPI**, com as credenciais informadas, e testa a autenticação.
+10. **Baixa e extrai o GLPI** da versão especificada diretamente do GitHub Releases, fazendo backup automático de uma instalação existente no mesmo caminho.
+11. **Configura o VirtualHost do Apache**, com `mod_rewrite` habilitado e regras para repassar o cabeçalho `Authorization` e redirecionar requisições para `index.php`.
+12. **Ajusta o `php.ini`** (`memory_limit`, `upload_max_filesize`, `post_max_size`, `max_execution_time`, `session.cookie_httponly`, `expose_php`).
+13. **Configura as permissões** do diretório de instalação (`www-data`, com `775` em `files`, `config`, `plugins` e `marketplace`).
+14. **Salva as credenciais** geradas em `/root/glpi-install-credentials.txt` (permissão `600`).
+15. **Exibe um passo a passo final**, explicando que o GLPI ainda não está instalado (isso só acontece pelo assistente web) e o que fazer em seguida.
 
 Todo o processo é registrado em `/var/log/glpi-install.log`.
 
 > **Importante:** o script **não** remove o diretório `install/` do GLPI. Essa remoção só pode
-> acontecer depois de concluir o assistente de instalação pelo navegador — removê-lo antes
+> acontecer depois de concluir o assistente de instalação pelo navegador. Removê-lo antes
 > impede o GLPI de configurar idioma, licença e conexão com o banco pela interface web.
+
+## Repositório de PHP por distribuição
+
+A versão de PHP pedida (padrão `8.2`) muitas vezes não está nos repositórios oficiais da
+distro. O script identifica sozinho qual repositório usar:
+
+| Sistema detectado | Repositório usado |
+|---|---|
+| Ubuntu e derivados (`ID_LIKE=ubuntu`) | PPA `ondrej/php` |
+| Debian e derivados (`ID_LIKE=debian`) | Sury (`packages.sury.org/php`) |
+| Outras distros baseadas em APT | Apenas os repositórios da própria distro |
+
+Observações:
+
+- Se o repositório já estiver configurado, o script apenas o reutiliza, sem perguntar nem
+  adicionar de novo. Linhas comentadas e arquivos desativados (por exemplo
+  `.list.disabled`) não contam como configurados.
+- No Debian, o repositório Sury é adicionado com a chave em
+  `/usr/share/keyrings/sury-php.gpg` e `signed-by` no arquivo
+  `/etc/apt/sources.list.d/sury-php.list`, usando o codename detectado do sistema.
+- Se você recusar a adição do repositório e a versão de PHP não existir nos repositórios da
+  distro, o script aborta na etapa de verificação, antes de instalar Apache, MariaDB ou PHP.
 
 ## Requisitos
 
@@ -41,11 +64,23 @@ Todo o processo é registrado em `/var/log/glpi-install.log`.
 
 ## Uso
 
+Execução direta, sem clonar o repositório:
+
 ```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Peterfilho/glpi-installer/refs/heads/master/glpi-installer.sh)"
+```
+
+Ou baixando o script primeiro, o que permite revisar o conteúdo antes de executar:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/Peterfilho/glpi-installer/refs/heads/master/glpi-installer.sh
 sudo bash glpi-installer.sh
 ```
 
 O script é interativo: pressione Enter para aceitar cada valor padrão sugerido ou informe um valor customizado.
+
+> **Atenção:** não use `curl ... | sudo bash`. Nesse formato o `stdin` fica ocupado pelo
+> download e os prompts do script não conseguem ler as suas respostas.
 
 ## Após a instalação
 

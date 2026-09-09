@@ -16,8 +16,14 @@ CREDENTIALS_FILE="/root/glpi-install-credentials.txt"
 OS_NAME=""
 OS_VERSION=""
 OS_ID=""
+OS_ID_LIKE=""
+OS_FAMILY="unknown"
 OS_CODENAME=""
-USE_ONDREJ_PPA="n"
+
+PHP_REPO="none"
+PHP_REPO_LABEL="distribution repositories only"
+PHP_REPO_PRESENT="n"
+USE_PHP_REPO="n"
 
 GLPI_VERSION=""
 PHP_VERSION=""
@@ -60,11 +66,87 @@ detect_os() {
 
     OS_NAME="${PRETTY_NAME:-Unknown Linux}"
     OS_ID="${ID:-unknown}"
+    OS_ID_LIKE="${ID_LIKE:-}"
     OS_VERSION="${VERSION_ID:-unknown}"
     OS_CODENAME="${VERSION_CODENAME:-}"
 
     if ! command -v apt-get >/dev/null 2>&1; then
         fail "This installer currently supports only APT-based systems."
+    fi
+
+    # Ubuntu must be tested first because Ubuntu itself reports ID_LIKE=debian.
+    if [[ "$OS_ID" == "ubuntu" || " ${OS_ID_LIKE} " == *" ubuntu "* ]]; then
+        OS_FAMILY="ubuntu"
+        OS_CODENAME="${UBUNTU_CODENAME:-$OS_CODENAME}"
+    elif [[ "$OS_ID" == "debian" || " ${OS_ID_LIKE} " == *" debian "* ]]; then
+        OS_FAMILY="debian"
+    else
+        OS_FAMILY="unknown"
+    fi
+
+    if [[ -z "$OS_CODENAME" ]] && command -v lsb_release >/dev/null 2>&1; then
+        OS_CODENAME="$(lsb_release -cs 2>/dev/null || true)"
+    fi
+}
+
+php_repository_configured() {
+    local pattern=""
+
+    case "$PHP_REPO" in
+        ondrej)
+            pattern="ondrej"
+            ;;
+        sury)
+            pattern="packages.sury.org"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    # Only inspect the files APT actually reads, so a disabled or backed up
+    # repository file is not mistaken for a configured repository.
+    local files=()
+    local file=""
+
+    if [[ -f /etc/apt/sources.list ]]; then
+        files+=(/etc/apt/sources.list)
+    fi
+
+    if [[ -d /etc/apt/sources.list.d ]]; then
+        while IFS= read -r file; do
+            files+=("$file")
+        done < <(find /etc/apt/sources.list.d -maxdepth 1 -type f \
+            \( -name '*.list' -o -name '*.sources' \) 2>/dev/null)
+    fi
+
+    if [[ "${#files[@]}" -eq 0 ]]; then
+        return 1
+    fi
+
+    grep -IqsE "^[^#]*${pattern}" "${files[@]}"
+}
+
+detect_php_repository() {
+    case "$OS_FAMILY" in
+        ubuntu)
+            PHP_REPO="ondrej"
+            PHP_REPO_LABEL="ondrej/php PPA"
+            ;;
+        debian)
+            PHP_REPO="sury"
+            PHP_REPO_LABEL="Sury (packages.sury.org/php)"
+            ;;
+        *)
+            PHP_REPO="none"
+            PHP_REPO_LABEL="distribution repositories only"
+            ;;
+    esac
+
+    if php_repository_configured; then
+        PHP_REPO_PRESENT="y"
+    else
+        PHP_REPO_PRESENT="n"
     fi
 }
 
@@ -136,11 +218,17 @@ collect_inputs() {
     echo
     RUN_SECURE_DB_HARDENING="$(prompt_yes_no "Apply basic MariaDB hardening equivalent to mysql_secure_installation?" "y")"
 
-    if [[ "$OS_ID" == "ubuntu" ]]; then
-        echo
-        USE_ONDREJ_PPA="$(prompt_yes_no "Use ondrej/php PPA to install the selected PHP version?" "y")"
+    echo
+    if [[ "$PHP_REPO" == "none" ]]; then
+        log "No third-party PHP repository is known for ${OS_NAME}."
+        log "Only the PHP versions packaged by the distribution will be available."
+        USE_PHP_REPO="n"
+    elif [[ "$PHP_REPO_PRESENT" == "y" ]]; then
+        log "The ${PHP_REPO_LABEL} repository is already configured on this system and will be reused."
+        USE_PHP_REPO="y"
     else
-        USE_ONDREJ_PPA="n"
+        log "Detected PHP repository for this system: ${PHP_REPO_LABEL}"
+        USE_PHP_REPO="$(prompt_yes_no "Add the ${PHP_REPO_LABEL} repository to install the selected PHP version?" "y")"
     fi
 
     section "Installation summary"
@@ -159,7 +247,16 @@ collect_inputs() {
     fi
 
     log "Apply database hardening: ${RUN_SECURE_DB_HARDENING}"
-    log "Use ondrej/php PPA: ${USE_ONDREJ_PPA}"
+
+    if [[ "$PHP_REPO" == "none" ]]; then
+        log "PHP repository: distribution repositories only"
+    elif [[ "$PHP_REPO_PRESENT" == "y" ]]; then
+        log "PHP repository: ${PHP_REPO_LABEL} (already configured)"
+    elif [[ "$USE_PHP_REPO" == "y" ]]; then
+        log "PHP repository: ${PHP_REPO_LABEL} (will be added)"
+    else
+        log "PHP repository: ${PHP_REPO_LABEL} (declined, distribution packages will be used)"
+    fi
 
     echo
     local confirm
@@ -192,16 +289,80 @@ install_base_packages() {
         apt-transport-https
 }
 
-configure_php_repository() {
-    if [[ "$USE_ONDREJ_PPA" == "y" ]]; then
-        section "Configuring ondrej/php repository"
+configure_sury_repository() {
+    if [[ -z "$OS_CODENAME" ]]; then
+        fail "Could not detect the distribution codename, which is required to configure the Sury repository."
+    fi
 
-        add-apt-repository -y ppa:ondrej/php
-        apt-get update
+    local keyring="/usr/share/keyrings/sury-php.gpg"
+    local tmp_key="/tmp/sury-php-apt.key"
+
+    install -d -m 0755 /usr/share/keyrings
+
+    if ! curl -fsSL https://packages.sury.org/php/apt.gpg -o "$tmp_key"; then
+        fail "Could not download the Sury repository signing key."
+    fi
+
+    if head -c 64 "$tmp_key" | grep -q "BEGIN PGP PUBLIC KEY BLOCK"; then
+        gpg --batch --yes --dearmor --output "$keyring" "$tmp_key"
+        chmod 0644 "$keyring"
     else
+        install -m 0644 "$tmp_key" "$keyring"
+    fi
+
+    rm -f "$tmp_key"
+
+    echo "deb [signed-by=${keyring}] https://packages.sury.org/php/ ${OS_CODENAME} main" \
+        > /etc/apt/sources.list.d/sury-php.list
+
+    log "Sury repository configured for ${OS_CODENAME}."
+}
+
+configure_php_repository() {
+    if [[ "$PHP_REPO" == "none" || "$USE_PHP_REPO" != "y" ]]; then
         section "Skipping external PHP repository"
         log "The script will use PHP packages available from the current APT repositories."
+        return
     fi
+
+    if [[ "$PHP_REPO_PRESENT" == "y" ]]; then
+        section "Reusing the ${PHP_REPO_LABEL} repository"
+        log "The repository is already configured; only refreshing the package lists."
+        apt-get update
+        return
+    fi
+
+    section "Configuring the ${PHP_REPO_LABEL} repository"
+
+    case "$PHP_REPO" in
+        ondrej)
+            add-apt-repository -y ppa:ondrej/php
+            ;;
+        sury)
+            configure_sury_repository
+            ;;
+    esac
+
+    apt-get update
+}
+
+verify_php_available() {
+    section "Checking PHP ${PHP_VERSION} availability"
+
+    if apt-cache show "php${PHP_VERSION}" >/dev/null 2>&1; then
+        log "PHP ${PHP_VERSION} is available in the configured repositories."
+        return
+    fi
+
+    log "PHP ${PHP_VERSION} was not found in the configured repositories."
+
+    if [[ "$PHP_REPO" != "none" && "$USE_PHP_REPO" != "y" ]]; then
+        log "Re-run the installer and accept the ${PHP_REPO_LABEL} repository, or pick a PHP version packaged by ${OS_NAME}."
+    else
+        log "Pick a PHP version available in the configured repositories."
+    fi
+
+    fail "PHP ${PHP_VERSION} package is not available for installation."
 }
 
 install_web_stack() {
@@ -231,10 +392,6 @@ install_web_stack() {
         "php${PHP_VERSION}-bcmath"
         "libapache2-mod-php${PHP_VERSION}"
     )
-
-    if ! apt-cache show "php${PHP_VERSION}" >/dev/null 2>&1; then
-        fail "PHP ${PHP_VERSION} package was not found in the configured repositories."
-    fi
 
     apt-get install -y "${php_packages[@]}"
 
@@ -500,9 +657,11 @@ print_final_information() {
 main() {
     require_root
     detect_os
+    detect_php_repository
     collect_inputs
     install_base_packages
     configure_php_repository
+    verify_php_available
     install_web_stack
     harden_mariadb
     configure_database
